@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "klapp-rfq-sync-service"
+version = "1.0.0"
+description = "Klapp.ai RFQ Synchronization Service"
+requires-python = ">=3.11"
+dependencies = [
+    "aiokafka>=0.8.1",
+    "aiohttp>=3.9.1",
+    "asyncpg>=0.29.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "redis>=5.0.1",
+    "structlog>=23.2.0",
+    "prometheus-client>=0.19.0",
+    "circuitbreaker>=2.0.0",
+    "tenacity>=8.2.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.3",
+    "pytest-asyncio>=0.21.1",
+    "pytest-cov>=4.1.0",
+    "black>=23.12.1",
+    "mypy>=1.7.1",
+]
