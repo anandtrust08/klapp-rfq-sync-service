@@ -1,19 +1,22 @@
 # AI/LLM Configuration Guide - Klapp Platform
 
-> **Last Updated:** 2026-02-21
-> **Audience:** Developers, DevOps, Architects
+> **Last Updated:** 2026-02-23
+> **Audience:** Developers, DevOps, Business Users, Architects
 
 ---
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [Service-by-Service AI Inventory](#2-service-by-service-ai-inventory)
-3. [API Key Locations & Management](#3-api-key-locations--management)
-4. [Hardcoded Values Audit](#4-hardcoded-values-audit)
-5. [Architecture Assessment & Best Practices](#5-architecture-assessment--best-practices)
-6. [Security Issues & Recommendations](#6-security-issues--recommendations)
-7. [Guide: Adding a New LLM Provider (e.g., OpenAI/ChatGPT)](#7-guide-adding-a-new-llm-provider)
+2. [Managing LLM Models (Admin UI)](#2-managing-llm-models-admin-ui) **← Start here for day-to-day operations**
+3. [CLI Smoke Test (DevOps / CI)](#3-cli-smoke-test-devops--ci)
+4. [Service-by-Service AI Inventory](#4-service-by-service-ai-inventory)
+5. [API Key Locations & Management](#5-api-key-locations--management)
+6. [Hardcoded Values Audit](#6-hardcoded-values-audit)
+7. [Architecture Assessment & Best Practices](#7-architecture-assessment--best-practices)
+8. [Security Issues & Recommendations](#8-security-issues--recommendations)
+9. [Guide: Adding a New LLM Provider (e.g., OpenAI/ChatGPT)](#9-guide-adding-a-new-llm-provider)
+10. [Two-Phase RFQ Sync & AI Processing](#10-two-phase-rfq-sync--ai-processing)
 
 ---
 
@@ -33,7 +36,176 @@ The Klapp platform uses a **multi-provider LLM strategy** across 6 services:
 
 ---
 
-## 2. Service-by-Service AI Inventory
+## 2. Managing LLM Models (Admin UI)
+
+> **For: Business Users, Admins, Developers** — No terminal or code changes needed.
+
+### 2.1 Where to Find It
+
+1. Open the MedusaJS Admin panel → sidebar → **AI Agents**
+2. Click the **Configuration** tab
+
+You'll see:
+- **Summary cards**: Total Models / Healthy / Unhealthy / LiteLLM Online/Offline
+- **Model cards**: One per registered model, showing provider, health status, API key status, and test results
+
+### 2.2 Adding a New Model
+
+1. Click **Add Model**
+2. Select **Provider** (OpenAI, Anthropic, Gemini, Ollama, Azure, Mistral, Cohere, Bedrock)
+3. Pick a **Model** from the dropdown or click **Custom** for fine-tuned models
+4. Paste your **API Key**
+5. Click **Test** — validates directly against the provider (before saving)
+6. Click **Add Model** — saves to LiteLLM and auto-verifies
+
+After saving, you'll see a toast: "Model saved and verified (Xms)" (green) or "Model saved but verification failed" (yellow).
+
+### 2.3 Editing a Model (API Key Rotation)
+
+1. Click **Edit** on the model card
+2. Enter the new API key (leave blank to keep current)
+3. Adjust timeout/max tokens if needed
+4. Click **Test** (optional — tests with the new key before saving)
+5. Click **Update Model** → auto-verifies after save
+
+**No container restart needed.** LiteLLM stores per-model keys in its database.
+
+### 2.4 Deleting a Model
+
+1. Click **Delete** on the model card
+2. Confirm the prompt
+3. Model disappears immediately; config refreshes automatically
+
+> **Note:** Models from YAML config (badge: "YAML") will reappear after container restart. Only DB-managed models (badge: "API") are permanently deleted.
+
+### 2.5 Testing Models
+
+| Action | What it does |
+|--------|-------------|
+| **Test** (per card) | Sends `"Say OK"` with `max_tokens=5` via LiteLLM proxy. Shows latency or error inline. |
+| **Test All** (header button) | Sequentially tests every model. Updates each card inline. Shows summary toast: "All 3 passed" or "2/3 passed, 1 failed". |
+| **Auto-verify** | Runs automatically after every Add or Edit. No manual action needed. |
+
+### 2.6 Health Monitoring
+
+- Dashboard auto-refreshes every **30 seconds**
+- **Healthy** = model responded to health check
+- **Unhealthy** = model failed health check (hover error badge for details)
+- **LiteLLM Online/Offline** = whether the LiteLLM proxy itself is reachable
+
+### 2.7 Architecture (How It Works)
+
+```
+Admin UI (Configuration Tab)
+    │
+    │  REST API calls
+    ▼
+MedusaJS Backend (/admin/ai-agents/models/config/*)
+    │
+    │  HTTP calls
+    ▼
+LiteLLM Proxy ◄── Single source of truth for model registry
+    │
+    ├── /model/new      (add)
+    ├── /model/update    (edit)
+    ├── /model/delete    (delete)
+    ├── /health          (health check)
+    └── /chat/completions (test)
+           │
+           ▼
+    Upstream Providers (OpenAI, Anthropic, Gemini, etc.)
+```
+
+- **LiteLLM is the single source of truth** for which models exist and their API keys
+- The admin UI reads from and writes to LiteLLM
+- Application services just say "use model X via LiteLLM" — they never hold upstream API keys
+- This is the industry-standard pattern used by companies like LinkedIn, Brex, and YC startups
+
+---
+
+## 3. CLI Smoke Test (DevOps / CI)
+
+> **For: DevOps, Operators, CI/CD pipelines**
+
+### 3.1 Script Location
+
+```
+klapp-ai-agent-rfq/scripts/manage-llm.sh
+```
+
+### 3.2 Commands
+
+```bash
+# Check if LiteLLM is alive
+./manage-llm.sh health
+
+# Health check + smoke test all registered models
+./manage-llm.sh test
+
+# Full status: health + list models + smoke test all (default)
+./manage-llm.sh status
+```
+
+### 3.3 Configuration
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `LITELLM_URL` | `http://localhost:4000` | LiteLLM proxy URL |
+| `LITELLM_KEY` | (empty) | Optional API key for authenticated access |
+
+### 3.4 Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | All checks passed |
+| 1 | One or more checks failed |
+
+### 3.5 Example Output
+
+```
+LiteLLM Health Check
+Endpoint: http://localhost:4000
+
+  Status: Online
+
+Registered Models
+  1. gemini-2.0-flash
+  2. claude-sonnet-4-20250514
+  3. gpt-4o
+
+  Total: 3 models
+
+Smoke Testing All Models
+
+  Testing gemini-2.0-flash...                    PASS
+  Testing claude-sonnet-4-20250514...            PASS
+  Testing gpt-4o...                              PASS
+
+Results: 3/3 passed
+```
+
+### 3.6 Usage in CI/CD
+
+```yaml
+# GitLab CI example
+verify-llm:
+  stage: verify
+  script:
+    - LITELLM_URL=http://litellm:4000 ./scripts/manage-llm.sh status
+  allow_failure: false
+```
+
+### 3.7 Usage on VPS After Deployment
+
+```bash
+ssh user@vps
+cd /opt/klapp/klapp-ai-agent-rfq
+LITELLM_URL=http://localhost:4000 ./scripts/manage-llm.sh status
+```
+
+---
+
+## 4. Service-by-Service AI Inventory
 
 ### 2.1 klapp-email-processing-service (Python)
 
@@ -221,9 +393,9 @@ OPENAI_MODEL=gpt-4o-mini
 
 ---
 
-## 3. API Key Management
+## 5. API Key Management
 
-### 3.1 Single Source of Truth
+### 5.1 Single Source of Truth
 
 **YES - there is ONE central .env file** for all AI/LLM API keys:
 
@@ -236,7 +408,7 @@ This file contains:
 - `ANTHROPIC_API_KEY` - Anthropic Claude (fallback / enrichment)
 - `OPENAI_API_KEY` - OpenAI (reserved, currently empty)
 
-### 3.2 How Keys Flow to Services
+### 5.2 How Keys Flow to Services
 
 **Docker (primary):** `docker-compose.yml` reads the central `.env` and injects keys into each container:
 
@@ -254,15 +426,22 @@ central .env (GOOGLE_API_KEY, ANTHROPIC_API_KEY)
 
 **Local dev (outside Docker):** Run `./scripts/setup-dev-env.sh` to distribute keys from the central `.env` to per-service `.env` files.
 
-### 3.3 Key Rotation Procedure
+### 5.3 Key Rotation Procedure
 
-To rotate an API key:
+**Preferred method (Admin UI — no restart needed):**
+1. Open Admin UI → AI Agents → Configuration tab
+2. Click **Edit** on the model
+3. Enter new API key → click **Test** to validate before saving
+4. Click **Update Model** → auto-verified after save
+5. Done. LiteLLM stores per-model keys in its DB. No container restart needed.
+
+**Alternative (Docker env vars — requires restart):**
 1. Update the key in `klapp-ai-agent-rfq/docker/compose/.env`
 2. Restart Docker services: `docker compose restart`
 3. If running services locally, re-run `./scripts/setup-dev-env.sh`
 4. For production, update the `.env` on the VPS and restart
 
-### 3.4 Adding a New API Key
+### 5.4 Adding a New API Key
 
 Checklist:
 1. Add the key to `klapp-ai-agent-rfq/docker/compose/.env`
@@ -272,7 +451,7 @@ Checklist:
 5. Update `scripts/setup-dev-env.sh` to distribute the new key
 6. Update this documentation
 
-### 3.5 Per-Service .env Files (Model Config Only)
+### 5.5 Per-Service .env Files (Model Config Only)
 
 Per-service `.env` files should contain **model names, timeouts, and service-specific config** but NOT API keys:
 
@@ -281,7 +460,7 @@ klapp-email-processing-service/.env  → LLM_PROVIDER, GEMINI_MODEL, etc.
 klapp-marketplace/backend/.env       → GEMINI_MODEL, AI_ANALYSIS_ENABLED, etc.
 ```
 
-### 3.6 Security Measures
+### 5.6 Security Measures
 
 - **Pre-commit hooks**: `detect-secrets` prevents accidentally committing API keys
 - **`.gitignore`**: All `.env` files are excluded from git
@@ -289,9 +468,9 @@ klapp-marketplace/backend/.env       → GEMINI_MODEL, AI_ANALYSIS_ENABLED, etc.
 
 ---
 
-## 4. Hardcoded Values Audit
+## 6. Hardcoded Values Audit
 
-### 4.1 Hardcoded Model Names (ALL acceptable - used as defaults)
+### 6.1 Hardcoded Model Names (ALL acceptable - used as defaults)
 
 All model names in code are used as **fallback defaults** with `os.getenv("VAR", "default")` pattern:
 
@@ -306,7 +485,7 @@ All model names in code are used as **fallback defaults** with `os.getenv("VAR",
 | `supplier-discovery/app/config.py:103` | `gpt-4o-mini` | `os.getenv()` default | OK |
 | `shared-ts/src/gemini/config.ts:10` | `gemini-2.0-flash-exp` | Config default | OK |
 
-### 4.2 Hardcoded API Endpoints
+### 6.2 Hardcoded API Endpoints
 
 | File | URL | Verdict |
 |------|-----|---------|
@@ -314,11 +493,11 @@ All model names in code are used as **fallback defaults** with `os.getenv("VAR",
 | `gateway.py:206` | `https://generativelanguage.googleapis.com/v1beta/models/...` | OK - Standard endpoint |
 | Various | `http://localhost:11434` | OK - Local Ollama default |
 
-### 4.3 Hardcoded Temperature/Tokens/Timeouts
+### 6.3 Hardcoded Temperature/Tokens/Timeouts
 
 All use sensible defaults - `temperature=0.1` for extraction tasks, `max_tokens=8192` for Gemini, `timeout=120s`. These are acceptable as defaults.
 
-### 4.4 CRITICAL: Hardcoded API Key Found
+### 6.4 CRITICAL: Hardcoded API Key Found
 
 **File:** `klapp-email-processing-service/test_claude_vs_ollama.py` (line 22)
 **Issue:** A real Anthropic API key is hardcoded in a test file
@@ -326,9 +505,9 @@ All use sensible defaults - `temperature=0.1` for extraction tasks, `max_tokens=
 
 ---
 
-## 5. Architecture Assessment & Best Practices
+## 7. Architecture Assessment & Best Practices
 
-### 5.1 Compliance Matrix
+### 7.1 Compliance Matrix
 
 | Category | email-processing | supplier-discovery (py) | klapp-marketplace | klapp-supplier-discovery (ts) | quote-processing |
 |----------|:-:|:-:|:-:|:-:|:-:|
@@ -339,7 +518,7 @@ All use sensible defaults - `temperature=0.1` for extraction tasks, `max_tokens=
 | Retry Logic | Model-level fallback | Exponential backoff | Timeout only | Exponential + jitter | None |
 | Prompt Management | **DB + Redis cache** | **DB + cache** | Hardcoded | Hardcoded | Hardcoded |
 
-### 5.2 What's Done Well
+### 7.2 What's Done Well
 
 1. **email-processing-service**: Best implementation overall
    - LLMGateway singleton with cross-provider fallback (Gemini -> Claude -> Ollama)
@@ -356,7 +535,7 @@ All use sensible defaults - `temperature=0.1` for extraction tasks, `max_tokens=
    - Exponential backoff with jitter to prevent thundering herd
    - Batch processing with rate-limit awareness
 
-### 5.3 What Needs Improvement
+### 7.3 What Needs Improvement
 
 | Issue | Impact | Services Affected |
 |-------|--------|-------------------|
@@ -368,7 +547,7 @@ All use sensible defaults - `temperature=0.1` for extraction tasks, `max_tokens=
 | **Hardcoded prompts in TypeScript** | Cannot update prompts without code deploy | marketplace, klapp-supplier-discovery |
 | **No secret scanning in CI/CD** | API keys can leak into git | All |
 
-### 5.4 Industry Best Practices Comparison
+### 7.4 Industry Best Practices Comparison
 
 | Best Practice | Current State | Recommendation |
 |---------------|---------------|----------------|
@@ -384,9 +563,9 @@ All use sensible defaults - `temperature=0.1` for extraction tasks, `max_tokens=
 
 ---
 
-## 6. Security Issues & Recommendations
+## 8. Security Issues & Recommendations
 
-### 6.1 Issues Fixed (2026-02-21)
+### 8.1 Issues Fixed (2026-02-21)
 
 - [x] **Removed hardcoded Anthropic API key** from `klapp-email-processing-service/test_claude_vs_ollama.py` - now reads from `os.getenv("ANTHROPIC_API_KEY", "")`
 - [x] **Fixed mislabeled key** in `klapp-supplier-discovery/.env` - removed incorrect `ANTHROPIC_API_KEY` that contained a Google API key value
@@ -394,13 +573,13 @@ All use sensible defaults - `temperature=0.1` for extraction tasks, `max_tokens=
 - [x] **Removed duplicate API keys** from `klapp-email-processing-service/.env` and `klapp-marketplace/backend/.env`
 - [x] **Added pre-commit hooks** (`detect-secrets`) to 4 repos
 
-### 6.2 Manual Action Required
+### 8.2 Manual Action Required
 
 - **Revoke the leaked Anthropic API key** on https://console.anthropic.com and generate a new one
 - **Run `detect-secrets scan > .secrets.baseline`** in each repo to initialize the baseline
 - **Install pre-commit**: `pip install pre-commit && pre-commit install` in each repo
 
-### 6.3 Long-term Architecture
+### 8.3 Long-term Architecture
 
 - Adopt a secrets manager (HashiCorp Vault, Infisical, or cloud-native like AWS SSM)
 - Implement API key rotation automation
@@ -408,7 +587,7 @@ All use sensible defaults - `temperature=0.1` for extraction tasks, `max_tokens=
 
 ---
 
-## 7. Guide: Adding a New LLM Provider
+## 9. Guide: Adding a New LLM Provider
 
 ### Step-by-step: Adding OpenAI/ChatGPT (or any new LLM)
 
@@ -611,4 +790,81 @@ AI_ANALYSIS_ENABLED=true
 
 # n8n (mapped from GOOGLE_API_KEY)
 N8N_GOOGLE_API_KEY=
+
+# LiteLLM (admin UI model management)
+LITELLM_URL=http://localhost:4000  # Used by manage-llm.sh CLI tool
+LITELLM_KEY=                        # Optional auth key for LiteLLM proxy
 ```
+
+---
+
+## 10. Two-Phase RFQ Sync & AI Processing
+
+> **Added 2026-02-23.** This section documents the two-phase sync architecture for RFQ creation.
+
+### 10.1 Problem
+
+When an email arrives and creates an RFQ, AI extraction (classification, line item parsing, enrichment) takes 5-30 seconds. Previously, the sync service waited for everything to complete, which meant:
+- RFQs appeared in the admin UI with 0 line items (confusing)
+- Operators couldn't see the RFQ was being processed
+- If AI failed, the entire sync failed
+
+### 10.2 Solution: Two-Phase Sync
+
+```
+Email arrives
+     │
+     ▼
+Email Processing Service
+     │
+     ├── rfq.created ──────────► Phase 1: Create RFQ in MedusaJS immediately
+     │                           - Header data only (sender, subject, urgency)
+     │                           - line_items = [] (empty)
+     │                           - ai_processing_status = "pending"
+     │                           - Admin UI shows "AI Processing Pending" placeholder
+     │
+     └── AI Pipeline ──────────► rfq.ai_processing.completed
+            (5-30 seconds)              │
+                                        ▼
+                                  Phase 2: Update RFQ in MedusaJS
+                                  - Line items with quantities, specs, manufacturers
+                                  - ai_confidence_score
+                                  - ai_processing_status = "completed"
+                                  - status: received → processing
+                                  - Admin UI auto-refreshes and shows line items
+```
+
+### 10.3 Kafka Topics
+
+| Topic | Phase | Publisher | Consumer |
+|-------|-------|-----------|----------|
+| `rfq.created` | 1 | Email Processing Service | rfq-sync-service |
+| `rfq.ai_processing.completed` | 2 | Email Processing Service | rfq-sync-service |
+
+### 10.4 Admin UI Behavior
+
+The RFQ detail page (`/app/rfqs/:id`) shows different states in the Line Items tab:
+
+| `ai_processing_status` | Tab Label | Content |
+|------------------------|-----------|---------|
+| `pending` or `null` (no items) | Line Items (...) | Clock icon + "AI Processing Pending" |
+| `processing` (no items) | Line Items (...) | Spinner + "AI is extracting line items..." |
+| `failed` | Line Items (0) | Red error + "AI extraction failed" + retry |
+| `completed` or has items | Line Items (3) | Normal line items table |
+
+Auto-refresh: Polls every 5 seconds when status is `pending` or `processing`.
+
+### 10.5 Migration
+
+`Migration20260223100000.ts` backfills `ai_processing_status = 'completed'` for all existing RFQs that already have line items. This prevents pre-existing RFQs from showing the "AI Processing Pending" placeholder.
+
+### 10.6 Key Files
+
+| Service | File | Role |
+|---------|------|------|
+| rfq-sync-service | `src/syncers/rfq_syncer.py` | `sync_to_medusa()` Phase 1 logic, `sync_ai_processing_result()` Phase 2 |
+| rfq-sync-service | `src/consumers/sync_consumer.py` | Routes `rfq.ai_processing.completed` events |
+| rfq-sync-service | `src/config.py` | `TOPIC_RFQ_AI_PROCESSING_COMPLETED` |
+| klapp-marketplace | `backend/src/admin/routes/rfqs/[id]/page.tsx` | UI states, auto-refresh |
+| klapp-marketplace | `backend/src/modules/rfq/migrations/Migration20260223100000.ts` | Backfill migration |
+| klapp-ai-agent-rfq | `docker/compose/docker-compose.yml` | Kafka topic creation |
